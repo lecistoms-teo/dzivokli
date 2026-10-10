@@ -1,0 +1,49 @@
+name: Dzīvokļu uzraugs
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # ik pēc ~10 min (GitHub var aizkavēt par dažām minūtēm)
+  workflow_dispatch:          # poga "Run workflow" manuālai palaišanai
+  push:
+    paths: [config.yaml, monitor.py]   # palaiž uzreiz pēc filtru maiņas
+
+permissions:
+  contents: write
+
+concurrency:
+  group: monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Pārbaudīt sludinājumus
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "::warning::Nav pievienoti TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID noslēpumi. Pārbaude izlaista."
+            exit 0
+          fi
+          python monitor.py
+
+      - name: Saglabāt redzētos sludinājumus
+        if: always()
+        run: |
+          git config user.name "dzivokli-bot"
+          git config user.email "dzivokli-bot@users.noreply.github.com"
+          [ -f seen.json ] || exit 0
+          git add seen.json
+          git diff --cached --quiet || (git commit -m "seen: atjaunināts" && git push)
