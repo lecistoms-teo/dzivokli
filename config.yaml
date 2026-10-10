@@ -1,0 +1,59 @@
+# =====================================================================
+#  Dzīvokļu uzrauga iestatījumi
+#  Rediģē šo failu tieši GitHub (zīmulis ✏️ augšā labajā stūrī → Commit).
+#  Filtru skaits nav ierobežots. Jebkuru lauku var izlaist vai dzēst —
+#  tad tas netiek pārbaudīts.
+# =====================================================================
+
+settings:
+  # ss.com pilsētas/reģioni: <ss.com adreses daļa>: <nosaukums ziņā>
+  # Piemēri: riga, jurmala, riga-region, ogre-and-reg, jelgava-and-reg
+  ss_cities:
+    riga: Rīga
+  ss_pages: 2          # cik ss.com lapas (pa 30 sludinājumiem) pārbaudīt katru reizi
+  city24_items: 60     # cik jaunākos city24 sludinājumus pārbaudīt katru reizi
+
+filters:
+  # ---------------------------------------------------------------
+  - name: "Mani dzīvokļi"
+    deal: sell                 # sell = pārdod, rent = izīrē
+    sources: [ss, city24]
+    city: Rīga
+    # city24 izmanto oficiālās apkaimes (Brasa, Avoti u.c.).
+    # ss.com Brasu un Avotus atsevišķi nedala, tur tie parasti ir "Centrs".
+    districts: [Āgenskalns, Brasa, Avoti, Centrs, Torņakalns]
+    price_min: 70000
+    price_max: 180000
+    area_min: 50
+
+  # ---------------------------------------------------------------
+  # Vari pievienot vēl filtrus, nokopējot bloku augstāk. Piemēram:
+  # - name: "Lēti Purvciemā"
+  #   deal: sell
+  #   city: Rīga
+  #   districts: [Purvciems]
+  #   price_max: 70000
+  #   rooms_min: 2
+
+# ---------------------------------------------------------------------
+#  Visi pieejamie lauki filtram:
+#    name               – nosaukums, redzams ziņā
+#    enabled            – true/false
+#    deal               – sell | rent
+#    sources            – [ss, city24]
+#    city               – Rīga, Jūrmala, ...
+#    districts          – apkaimju saraksts (garumzīmes nav obligātas)
+#    exclude_districts  – apkaimes, ko neiekļaut
+#    price_min / price_max
+#    price_m2_min / price_m2_max
+#    area_min / area_max         (m²)
+#    rooms_min / rooms_max
+#    floor_min / floor_max
+#    not_last_floor     – true, lai izslēgtu pēdējo stāvu
+#    series             – mājas sērija (ss.com: 103., 104., 119., 467., 602.,
+#                         Čehu pr., Hrušč., LT proj., M. ģim., P. kara,
+#                         Priv. m., Renov., Specpr., Staļina, Jaun.)
+#    exclude_series     – sērijas, ko neiekļaut (piem. [Hrušč., LT proj.])
+#    keywords           – vismaz vienam vārdam jābūt sludinājuma tekstā
+#    exclude_keywords   – ja kāds no vārdiem ir tekstā, sludinājums netiek sūtīts
+# ---------------------------------------------------------------------
