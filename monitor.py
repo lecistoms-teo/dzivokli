@@ -14,6 +14,7 @@ un līdz 3 piemēriem; pārējie esošie sludinājumi tikai tiek atzīmēti.
 Vides mainīgie:
   TELEGRAM_BOT_TOKEN  – bota žetons no @BotFather
   TELEGRAM_CHAT_ID    – tavs čata ID (vai vairāki, atdalīti ar komatu)
+  BACKFILL_DAYS=7     – nosūtīt visus atbilstošos pēdējo N dienu sludinājumus
   DRY_RUN=1           – nesūtīt ziņas, tikai izdrukāt konsolē
 """
 from __future__ import annotations
@@ -347,6 +348,139 @@ def send_telegram(text: str, image: str | None) -> None:
         time.sleep(1.1)  # Telegram limits ~1 ziņa/sek uz čatu
 
 
+# ---------------------------------------------------------------- vēsture
+
+# apkaimes nosaukums -> ss.com adreses daļa (Brasa un Avoti ss.com ir "Centrs")
+SS_DISTRICT_SLUGS = {
+    "centrs": "centre", "brasa": "centre", "avoti": "centre", "vecriga": "centre",
+    "agenskalns": "agenskalns", "tornakalns": "tornakalns", "teika": "teika",
+    "purvciems": "purvciems", "plavnieki": "plyavnieki", "imanta": "imanta",
+    "jugla": "yugla", "kengarags": "kengarags", "mezaparks": "mezhapark",
+    "ciekurkalns": "chiekurkalns", "sarkandaugava": "sarkandaugava",
+    "grizinkalns": "grizinkalns", "darzciems": "darzciems", "zolitude": "zolitude",
+    "ziepniekkalns": "ziepniekkalns", "kipsala": "kipsala", "dzeguzkalns": "dzeguzhkalns",
+    "ilguciems": "ilguciems", "zasulauks": "zasulauks", "mezciems": "mezhciems",
+    "bolderaja": "bolderaya", "vecmilgravis": "vecmilgravis", "bergi": "bergi",
+}
+SS_DATE_RE = re.compile(r"Datums:\s*(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2})")
+
+
+def ss_ad_date(url: str):
+    from datetime import datetime
+    r = session.get(url, timeout=30)
+    r.encoding = "utf-8"
+    m = SS_DATE_RE.search(BeautifulSoup(r.text, "html.parser").get_text(" "))
+    if not m:
+        return None
+    d, mo, y, h, mi = map(int, m.groups())
+    return datetime(y, mo, d, h, mi)
+
+
+def backfill(days: int, filters: list[dict]) -> int:
+    """Nosūta visus atbilstošos sludinājumus no pēdējām `days` dienām."""
+    from datetime import datetime, timedelta, timezone
+    riga = timezone(timedelta(hours=3))
+    cutoff = datetime.now(riga).replace(tzinfo=None) - timedelta(days=days)
+    sell_filters = [f for f in filters if f.get("deal", "sell") == "sell"]
+    found: dict[str, tuple[Listing, list[str], datetime]] = {}
+
+    def names_for(l):
+        return [f.get("name", "Filtrs") for f in sell_filters if matches(l, f)]
+
+    # --- ss.com: pa apkaimēm, lapu pa lapai, datumu ņem no sludinājuma
+    slugs: dict[str, str] = {}  # ss slug -> apkaimes nosaukums no filtra
+    for f in sell_filters:
+        if "ss" not in (f.get("sources") or ["ss", "city24"]):
+            continue
+        for d in f.get("districts") or []:
+            s = SS_DISTRICT_SLUGS.get(norm(d))
+            if s and (s not in slugs or norm(d) == "centrs"):
+                slugs[s] = d
+    for slug, label in slugs.items():
+        older_streak = 0
+        for page in range(1, 16):
+            p = "" if page == 1 else f"page{page}.html"
+            url = f"{SS_BASE}/lv/real-estate/flats/riga/{slug}/sell/{p}"
+            r = session.get(url, timeout=30, allow_redirects=False)
+            if r.status_code != 200:
+                break  # ss.com pāradresē, ja lapu vairs nav
+            r.encoding = "utf-8"
+            items = parse_ss(r.text, "Rīga")
+            if not items:
+                break
+            stop = False
+            for l in items:
+                if not l.district:
+                    l.district = label
+                l.extra["deal"] = "sell"
+                n = names_for(l)
+                if not n or l.key in found:
+                    continue
+                dt = ss_ad_date(l.url)
+                time.sleep(0.7)
+                if dt and dt < cutoff:
+                    older_streak += 1
+                    if older_streak >= 3:
+                        stop = True
+                        break
+                    continue
+                older_streak = 0
+                found[l.key] = (l, n, dt or datetime.now(riga).replace(tzinfo=None))
+            print(f"ss.com {slug} lapa {page}: kopā atrasti {len(found)}")
+            if stop:
+                break
+            time.sleep(1.0)
+
+    # --- city24: jaunākie pēc publicēšanas datuma, līdz robežai
+    if any("city24" in (f.get("sources") or ["ss", "city24"]) for f in sell_filters):
+        for page in range(1, 41):
+            params = {"address[cc]": 2, "tsType": "sale", "unitType": "Apartment",
+                      "itemsPerPage": 100, "page": page, "order[datePublished]": "desc"}
+            r = session.get(C24_API, params=params, timeout=30,
+                            headers={"Accept": "application/json"})
+            r.raise_for_status()
+            data = r.json()
+            if isinstance(data, dict):
+                data = data.get("hydra:member") or data.get("items") or []
+            if not data:
+                break
+            oldest = None
+            for it, l in zip(data, parse_city24(data)):
+                try:
+                    dt = datetime.fromisoformat(it.get("date_published")).astimezone(riga).replace(tzinfo=None)
+                except Exception:  # noqa: BLE001
+                    continue
+                oldest = dt if oldest is None or dt < oldest else oldest
+                if dt < cutoff:
+                    continue
+                l.extra["deal"] = "sell"
+                n = names_for(l)
+                if n:
+                    found.setdefault(l.key, (l, n, dt))
+            print(f"city24 lapa {page}: kopā atrasti {len(found)}")
+            # pirmās rindas var būt VIP; apstājas, kad visa lapa ir vecāka
+            if oldest and oldest < cutoff and page > 1:
+                last_dt = None
+                try:
+                    last_dt = datetime.fromisoformat(data[-1].get("date_published")).astimezone(riga).replace(tzinfo=None)
+                except Exception:  # noqa: BLE001
+                    pass
+                if last_dt and last_dt < cutoff:
+                    break
+            time.sleep(0.5)
+
+    rows = sorted(found.values(), key=lambda x: x[2], reverse=True)
+    send_telegram(f"📋 <b>Pēdējo {days} dienu sludinājumi pēc taviem kritērijiem: {len(rows)}</b>\n"
+                  "(jaunākie pirmie)", None)
+    for l, n, dt in rows[:150]:
+        msg = build_message(l, n).replace("🆕 ", f"🗓 {dt:%d.%m %H:%M} · ", 1)
+        send_telegram(msg, l.image)
+    if len(rows) > 150:
+        send_telegram(f"… un vēl {len(rows) - 150}. Sašaurini filtrus, lai redzētu visus.", None)
+    print(f"Nosūtīti: {min(len(rows), 150)} no {len(rows)}")
+    return 0
+
+
 # ---------------------------------------------------------------- galvenais
 
 def load_seen() -> tuple[list[str], bool]:
@@ -358,6 +492,8 @@ def load_seen() -> tuple[list[str], bool]:
 def main() -> int:
     cfg = yaml.safe_load(CONFIG_PATH.read_text("utf-8")) or {}
     filters = [f for f in (cfg.get("filters") or []) if f.get("enabled", True)]
+    if int(os.environ.get("BACKFILL_DAYS") or 0) > 0:
+        return backfill(int(os.environ["BACKFILL_DAYS"]), filters)
     settings = cfg.get("settings") or {}
     deals = sorted({f.get("deal", "sell") for f in filters}) or ["sell"]
     ss_cities = settings.get("ss_cities") or {"riga": "Rīga"}
