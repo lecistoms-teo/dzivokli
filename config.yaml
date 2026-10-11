@@ -21,7 +21,7 @@ filters:
     city: Rīga
     # city24 izmanto oficiālās apkaimes (Brasa, Avoti u.c.).
     # ss.com Brasu un Avotus atsevišķi nedala, tur tie parasti ir "Centrs".
-    districts: [Āgenskalns, Brasa, Avoti, Centrs, Torņakalns]
+    districts: [Āgenskalns, Brasa, Avoti, Centrs, Torņakalns, Mežaparks, Teika]
     price_min: 70000
     price_max: 180000
     area_min: 50
