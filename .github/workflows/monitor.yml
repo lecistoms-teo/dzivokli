@@ -17,7 +17,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -44,6 +44,6 @@ jobs:
         run: |
           git config user.name "dzivokli-bot"
           git config user.email "dzivokli-bot@users.noreply.github.com"
-          [ -f seen.json ] || exit 0
-          git add seen.json
+          ls seen*.json >/dev/null 2>&1 || exit 0
+          git add seen*.json
           git diff --cached --quiet || (git commit -m "seen: atjaunināts" && git push)
