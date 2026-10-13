@@ -36,6 +36,7 @@ from bs4 import BeautifulSoup
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.yaml"
 SEEN_PATH = ROOT / "seen.json"
+SEEN_HOUSES_PATH = ROOT / "seen_houses.json"
 SEEN_KEEP = 20000  # cik ID glabāt (vecākie tiek dzēsti)
 
 UA = (
@@ -64,6 +65,10 @@ class Listing:
     price: float | None = None
     image: str | None = None
     title: str = ""
+    kind: str = "flat"     # "flat" | "house"
+    land: float | None = None      # zemes platība m²
+    lat: float | None = None
+    lon: float | None = None
     extra: dict = field(default_factory=dict)
 
     @property
@@ -176,6 +181,83 @@ def fetch_ss(city: str, deal: str, pages: int, city_label: str) -> list[Listing]
     return res
 
 
+def to_land(s: str | None) -> float | None:
+    """'9800 m²' -> 9800; '1.5 ha' -> 15000."""
+    if not s:
+        return None
+    v = to_num(s)
+    if v is None:
+        return None
+    return v * 10000 if "ha" in s.lower() else v
+
+
+def parse_ss_houses(html_text: str) -> list[Listing]:
+    soup = BeautifulSoup(html_text, "html.parser")
+    out: list[Listing] = []
+    for tr in soup.select('tr[id^="tr_"]'):
+        tr_id = tr.get("id", "")
+        if not re.fullmatch(r"tr_\d+", tr_id):
+            continue
+        a = tr.select_one("a.am") or tr.select_one('a[href*="/msg/"]')
+        if not a:
+            continue
+        href = a.get("href", "")
+        url = href if href.startswith("http") else SS_BASE + href
+        cells = tr.select("td.msga2-o")
+        if len(cells) < 5:
+            continue
+        # kolonnas: [pagasts<br>vieta] m² stāvi zemes_pl. cena
+        loc = cells[0].get_text("\n", strip=True).split("\n")
+        img = tr.select_one("img.isfoto") or tr.select_one("img")
+        img_src = img.get("src") if img else None
+        if img_src and ".th2." in img_src:
+            img_src = img_src.replace(".th2.", ".800.")
+        out.append(Listing(
+            source="ss", id=tr_id[3:], url=url, kind="house",
+            city=loc[-1] if loc else "", district=loc[0] if len(loc) > 1 else "",
+            area=to_num(cells[1].get_text(strip=True)),
+            land=to_land(cells[3].get_text(" ", strip=True)),
+            price=to_num(cells[-1].get_text(strip=True)),
+            image=img_src if img_src and img_src.startswith("http") else None,
+            title=a.get_text(" ", strip=True),
+        ))
+    return out
+
+
+def fetch_ss_houses(region: str, pages: int) -> list[Listing]:
+    res: list[Listing] = []
+    for p in range(1, pages + 1):
+        pg = "" if p == 1 else f"page{p}.html"
+        url = f"{SS_BASE}/lv/real-estate/homes-summer-residences/{region}/all/sell/{pg}"
+        r = session.get(url, timeout=30, allow_redirects=False)
+        if r.status_code != 200:
+            break
+        r.encoding = "utf-8"
+        res.extend(parse_ss_houses(r.text))
+        time.sleep(1.2)
+    return res
+
+
+SS_COORD_RE = re.compile(r"[?&;]c=(5[5-8]\.\d+),\s*(2[0-9]\.\d+)")
+
+
+def ss_ad_coords(url: str) -> tuple[float, float] | None:
+    r = session.get(url, timeout=30)
+    r.encoding = "utf-8"
+    m = SS_COORD_RE.search(r.text)
+    return (float(m.group(1)), float(m.group(2))) if m else None
+
+
+def distance_km(lat1, lon1, lat2, lon2) -> float:
+    from math import asin, cos, radians, sin, sqrt
+    dlat, dlon = radians(lat2 - lat1), radians(lon2 - lon1)
+    a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
+    return 2 * 6371 * asin(sqrt(a))
+
+
+RIGA_CENTER = (56.9496, 24.1052)
+
+
 # ---------------------------------------------------------------- city24
 
 C24_API = "https://api.city24.lv/lv_LV/search/realties"
@@ -195,13 +277,22 @@ def parse_city24(items: list[dict]) -> list[Listing]:
         if img:
             img = img.replace("{fmt:em}", "14")
         floor = attrs.get("FLOOR")
+        is_house = it.get("unit_type") == "House"
+        land = to_num(it.get("lot_size"))
+        if land and it.get("lot_size_unit_id") == 2:
+            land *= 10000
+        place = addr.get("village_name") or addr.get("parish_name") or ""
         out.append(
             Listing(
                 source="city24",
                 id=fid,
-                url=f"https://www.city24.lv/real-estate/apartments-for-sale/x/{fid}",
-                city=city,
-                district=addr.get("district_name") or "",
+                url=f"https://www.city24.lv/real-estate/"
+                    f"{'houses' if is_house else 'apartments'}-for-sale/x/{fid}",
+                kind="house" if is_house else "flat",
+                land=land if is_house else None,
+                lat=it.get("latitude"), lon=it.get("longitude"),
+                city=(addr.get("city_name") or place or city) if is_house else city,
+                district=addr.get("district_name") or (addr.get("county_name") or "" if is_house else ""),
                 street=street,
                 rooms=it.get("room_count"),
                 area=to_num(it.get("property_size")),
@@ -218,11 +309,11 @@ def parse_city24(items: list[dict]) -> list[Listing]:
     return out
 
 
-def fetch_city24(deal: str, per_page: int) -> list[Listing]:
+def fetch_city24(deal: str, per_page: int, unit: str = "Apartment") -> list[Listing]:
     params = {
         "address[cc]": 2,
         "tsType": "sale" if deal == "sell" else "rent",
-        "unitType": "Apartment",
+        "unitType": unit,
         "itemsPerPage": per_page,
         "page": 1,
         "order[datePublished]": "desc",
@@ -236,7 +327,7 @@ def fetch_city24(deal: str, per_page: int) -> list[Listing]:
     listings = parse_city24(data)
     if deal != "sell":
         for l in listings:
-            l.url = l.url.replace("apartments-for-sale", "apartments-for-rent")
+            l.url = l.url.replace("-for-sale", "-for-rent")
     return listings
 
 
@@ -254,10 +345,20 @@ def _in_range(v, lo, hi) -> bool:
     return True
 
 
-def matches(l: Listing, f: dict) -> bool:
+def matches(l: Listing, f: dict, check_distance: bool = True) -> bool:
+    if f.get("type", "flat") != l.kind:
+        return False
     if f.get("sources") and l.source not in f["sources"]:
         return False
-    if f.get("city") and l.city and norm(f["city"]) not in norm(l.city):
+    if not _in_range(l.land, f.get("land_min"), f.get("land_max")):
+        return False
+    if check_distance and f.get("max_distance_km"):
+        if l.lat is None or l.lon is None:
+            return False
+        c = f.get("center") or RIGA_CENTER
+        if distance_km(c[0], c[1], l.lat, l.lon) > f["max_distance_km"]:
+            return False
+    if f.get("city") and l.city and l.kind == "flat" and norm(f["city"]) not in norm(l.city):
         return False
     d = norm(l.district)
     if f.get("districts"):
@@ -309,12 +410,16 @@ def build_message(l: Listing, filter_names: list[str]) -> str:
         parts.append(f"{l.area:g} m²")
     if l.floor:
         parts.append(f"{l.floor}/{l.floors_total or '?'}. st.")
+    if l.land:
+        parts.append(f"zeme {l.land / 10000:.2f} ha" if l.land >= 10000 else f"zeme {l.land:g} m²")
+    if l.lat is not None and l.lon is not None and l.kind == "house":
+        parts.append(f"{distance_km(*RIGA_CENTER, l.lat, l.lon):.0f} km no Rīgas")
     if l.series:
         parts.append(l.series)
-    pm2 = f" ({fmt_eur(l.price_m2)}/m²)" if l.price_m2 else ""
+    pm2 = f" ({fmt_eur(l.price_m2)}/m²)" if l.price_m2 and l.kind == "flat" else ""
     src = "ss.com" if l.source == "ss" else "city24.lv"
     lines = [
-        f"🆕 <b>{e(where or 'Jauns sludinājums')}</b>",
+        f"{'🏡' if l.kind == 'house' else '🆕'} <b>{e(where or 'Jauns sludinājums')}</b>",
         e(" · ".join(parts)),
         f"💶 <b>{fmt_eur(l.price)}</b>{pm2}",
     ]
@@ -483,10 +588,71 @@ def backfill(days: int, filters: list[dict]) -> int:
 
 # ---------------------------------------------------------------- galvenais
 
-def load_seen() -> tuple[list[str], bool]:
-    if SEEN_PATH.exists():
-        return json.loads(SEEN_PATH.read_text("utf-8")), False
+def load_seen(path: Path = SEEN_PATH) -> tuple[list[str], bool]:
+    if path.exists():
+        return json.loads(path.read_text("utf-8")), False
     return [], True
+
+
+def run_houses(filters: list[dict], settings: dict) -> None:
+    """Mājas ar zemi: ss.com reģioni + city24, attālums no Rīgas pēc koordinātām."""
+    hfilters = [f for f in filters if f.get("type") == "house"]
+    if not hfilters:
+        return
+    listings: list[Listing] = []
+    for region in settings.get("ss_house_regions") or ["riga-region"]:
+        try:
+            got = fetch_ss_houses(region, settings.get("ss_house_pages", 1))
+            listings += got
+            print(f"ss.com mājas {region}: {len(got)}")
+        except Exception as ex:  # noqa: BLE001
+            print(f"KĻŪDA: ss.com mājas {region}: {ex}", file=sys.stderr)
+    try:
+        got = fetch_city24("sell", settings.get("city24_items", 60), unit="House")
+        listings += got
+        print(f"city24 mājas: {len(got)}")
+    except Exception as ex:  # noqa: BLE001
+        print(f"KĻŪDA: city24 mājas: {ex}", file=sys.stderr)
+
+    seen, first_run = load_seen(SEEN_HOUSES_PATH)
+    seen_set = set(seen)
+    uniq: dict[str, Listing] = {}
+    for l in listings:
+        if l.key not in seen_set:
+            uniq.setdefault(l.key, l)
+    new = list(uniq.values())
+
+    def names_for(l: Listing) -> list[str]:
+        pre = [f for f in hfilters if matches(l, f, check_distance=False)]
+        if not pre:
+            return []
+        if l.lat is None and l.source == "ss":
+            try:
+                c = ss_ad_coords(l.url)
+                time.sleep(0.7)
+                if c:
+                    l.lat, l.lon = c
+            except Exception:  # noqa: BLE001
+                pass
+        return [f.get("name", "Mājas") for f in pre if matches(l, f)]
+
+    sent = 0
+    if first_run:
+        matching = [l for l in new if names_for(l)]
+        send_telegram("🏡 <b>Māju uzraudzība ieslēgta!</b>\n"
+                      f"Šobrīd tirgū atbilst {len(matching)}. No šī brīža saņemsi ziņu "
+                      "par katru jaunu atbilstošu māju.", None)
+        for l in matching[:3]:
+            send_telegram(build_message(l, names_for(l)), l.image)
+    else:
+        for l in new:
+            n = names_for(l)
+            if n:
+                send_telegram(build_message(l, n), l.image)
+                sent += 1
+    print(f"Mājas — jaunas: {len(new)}, nosūtītas: {sent}")
+    seen = (seen + [l.key for l in new])[-SEEN_KEEP:]
+    SEEN_HOUSES_PATH.write_text(json.dumps(seen, ensure_ascii=False), "utf-8")
 
 
 def main() -> int:
@@ -495,6 +661,8 @@ def main() -> int:
     if int(os.environ.get("BACKFILL_DAYS") or 0) > 0:
         return backfill(int(os.environ["BACKFILL_DAYS"]), filters)
     settings = cfg.get("settings") or {}
+    run_houses(filters, settings)
+    filters = [f for f in filters if f.get("type", "flat") == "flat"]
     deals = sorted({f.get("deal", "sell") for f in filters}) or ["sell"]
     ss_cities = settings.get("ss_cities") or {"riga": "Rīga"}
 

@@ -12,6 +12,10 @@ settings:
     riga: Rīga
   ss_pages: 2          # cik ss.com lapas (pa 30 sludinājumiem) pārbaudīt katru reizi
   city24_items: 60     # cik jaunākos city24 sludinājumus pārbaudīt katru reizi
+  # ss.com reģioni, kur meklēt mājas (attālumu pārbauda pēc koordinātām)
+  ss_house_regions: [riga-region, jurmala, ogre-and-reg, jelgava-and-reg,
+                     bauska-and-reg, tukums-and-reg, limbadzi-and-reg, cesis-and-reg]
+  ss_house_pages: 1    # cik lapas (pa 30) katram reģionam pārbaudīt katru reizi
 
 filters:
   # ---------------------------------------------------------------
@@ -27,6 +31,14 @@ filters:
     area_min: 50
 
   # ---------------------------------------------------------------
+  - name: "Māja ar zemi līdz 50 km"
+    type: house                # house = mājas, vasarnīcas, viensētas
+    sources: [ss, city24]
+    max_distance_km: 50        # attālums no Rīgas centra (taisnā līnijā)
+    price_max: 183000
+    land_min: 10000            # zemes platība m² (10000 m² = 1 ha)
+
+  # ---------------------------------------------------------------
   # Vari pievienot vēl filtrus, nokopējot bloku augstāk. Piemēram:
   # - name: "Lēti Purvciemā"
   #   deal: sell
@@ -38,6 +50,9 @@ filters:
 # ---------------------------------------------------------------------
 #  Visi pieejamie lauki filtram:
 #    name               – nosaukums, redzams ziņā
+#    type               – flat (dzīvoklis, noklusējums) | house (māja ar zemi)
+#    max_distance_km    – tikai mājām: maks. attālums no Rīgas centra
+#    land_min / land_max – tikai mājām: zemes platība m² (1 ha = 10000)
 #    enabled            – true/false
 #    deal               – sell | rent
 #    sources            – [ss, city24]
